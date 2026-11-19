@@ -1,0 +1,50 @@
+name: Supabase keep-alive
+
+# Ücretsiz planda Supabase projeleri ~7 gün hareketsiz kalırsa duraklatılır.
+# Bu iş günde 2 kez veritabanına gerçek bir sorgu atarak projeyi uyanık tutar.
+
+on:
+  schedule:
+    - cron: "17 5,17 * * *"   # her gün 05:17 ve 17:17 UTC
+  workflow_dispatch: {}        # Actions sekmesinden elle de çalıştırılabilir
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping Supabase (mm_list_rooms RPC)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_KEY:-}" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_KEY secret'ları tanımlı değil."
+            exit 1
+          fi
+
+          # Legacy anon anahtarı JWT'dir (Authorization ister); sb_publishable_ sadece apikey ister.
+          headers=(-H "apikey: ${SUPABASE_KEY}" -H "Content-Type: application/json")
+          case "$SUPABASE_KEY" in
+            sb_*) ;;
+            *) headers+=(-H "Authorization: Bearer ${SUPABASE_KEY}") ;;
+          esac
+
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' --max-time 20 \
+              -X POST "${SUPABASE_URL%/}/rest/v1/rpc/mm_list_rooms" \
+              "${headers[@]}" -d '{"p_version":"1"}' || echo "000")
+            echo "Deneme $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "Başarılı: $(head -c 200 /tmp/resp.json)"
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+
+          echo "::error::Supabase yanıt vermedi (son HTTP $code). Proje duraklatılmış olabilir."
+          cat /tmp/resp.json || true
+          exit 1
